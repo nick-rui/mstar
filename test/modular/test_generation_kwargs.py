@@ -6,6 +6,7 @@ status before a stream opens."""
 
 import asyncio
 import collections
+import json
 import types
 
 import pytest
@@ -14,9 +15,46 @@ from fastapi.testclient import TestClient
 from mstar.api_server import entrypoint
 from mstar.api_server.entrypoint import APIServer
 from mstar.api_server.request_types import ResultChunk
+from mstar.communication import wire, wire_types  # noqa: F401 — register conductor message bodies
 from mstar.conductor.conductor import Conductor
+from mstar.engine.resources.sampler.config import SamplingReqConfig
 from mstar.testing_utils.model import StubModel, make_model
 from mstar.utils.generation_kwargs import check_seed, normalize_generation_kwargs
+from mstar.utils.ipc_format import ConductorMessage, ConductorMessageType, NewRequestConductor
+
+INT_KNOBS = (
+    "top_k", "min_tokens", "repetition_window", "top_p_min_keep", "max_output_tokens",
+    "num_inference_steps", "num_step", "rollout_horizon", "num_frames", "height", "width",
+)
+
+
+@pytest.mark.parametrize("key", INT_KNOBS)
+@pytest.mark.parametrize("value", [2**63, 2**64, str(2**64), float(2**64)])
+def test_oversized_integer_knobs_raise(key, value):
+    with pytest.raises(ValueError, match=rf"{key}.*64-bit"):
+        normalize_generation_kwargs({key: value})
+
+
+@pytest.mark.parametrize("key", INT_KNOBS)
+@pytest.mark.parametrize("value", [2**63 - 1, str(2**63 - 1)])
+def test_int64_knob_boundary_roundtrips_through_conductor_wire(key, value):
+    kwargs = normalize_generation_kwargs({key: value})
+    message = ConductorMessage(ConductorMessageType.NEW_REQUEST, NewRequestConductor(
+        "r#1", {}, ["text"], ["text"], {}, kwargs,
+    ))
+    assert wire.decode(wire.encode(message)) == message
+    assert kwargs == {key: 2**63 - 1}
+
+
+@pytest.mark.parametrize("key", ["max_new_tokens", "max_completion_tokens", "max_tokens", "code_predictor_top_k"])
+def test_oversized_aliases_and_stage_knobs_raise(key):
+    with pytest.raises(ValueError, match="64-bit"):
+        normalize_generation_kwargs({key: 2**64})
+
+
+def test_sampler_rejects_oversized_integers():
+    with pytest.raises(ValueError, match="top_k.*64-bit"):
+        SamplingReqConfig(top_k=2**63).validate()
 
 
 def test_null_is_unset():
@@ -31,6 +69,7 @@ def test_null_is_unset():
     {"max_output_tokens": 1}, {"seed": -(2**63)}, {"ignore_eos": False}, {"return_token_ids": True},
     {"talker_temperature": 0.9}, {"code_predictor_top_k": 50},
     {"class_temperature": 0}, {"cfg_weight": "anything: not a knob"},
+    {"min_tokens": 0}, {"repetition_window": 0}, {"top_p_min_keep": 1},
 ])
 def test_in_contract_values_pass(kwargs):
     assert normalize_generation_kwargs(kwargs) == kwargs
@@ -52,6 +91,9 @@ def test_in_contract_values_pass(kwargs):
     ({"top_k": "5e0"}, "top_k"),
     ({"top_k": "five"}, "top_k"),
     ({"top_k": True}, "top_k"),
+    ({"min_tokens": -1}, "min_tokens"),
+    ({"repetition_window": -1}, "repetition_window"),
+    ({"top_p_min_keep": 0}, "top_p_min_keep"),
     ({"max_output_tokens": "0"}, "max_output_tokens"),
     ({"max_output_tokens": 0}, "max_output_tokens"),
     ({"seed": 2**64}, "seed"),
@@ -184,6 +226,19 @@ def test_generate_rejects_bad_knob_with_400(monkeypatch):
     assert "top_p" in response.json()["detail"]
 
 
+@pytest.mark.parametrize("key", ["top_k", "max_output_tokens", "num_frames"])
+@pytest.mark.parametrize("streaming", ["false", "true"])
+def test_generate_rejects_oversized_integers_with_400(monkeypatch, key, streaming):
+    server = _RecordingServer()
+    _patch_submit(monkeypatch, server)
+    response = TestClient(entrypoint.app).post(
+        "/generate", data={"model_kwargs": json.dumps({key: 2**64}), "streaming": streaming},
+    )
+    assert response.status_code == 400
+    assert key in response.json()["detail"]
+    assert server.submitted == []
+
+
 def test_a_refused_stream_gets_its_status_not_a_200(monkeypatch):
     refused = ResultChunk(
         request_id="r1", modality="error", data=b"this model does not support min_p",
@@ -301,7 +356,9 @@ def test_conductor_refuses_a_cap_the_run_loop_cannot_compare(bad):
         _conductor()._max_output_tokens({"max_output_tokens": bad})
 
 
-def test_rust_bridge_carries_a_refusal_as_a_400_chunk():
+@pytest.mark.parametrize("key", ["seed", "top_k", "max_output_tokens", "num_frames"])
+@pytest.mark.parametrize("value", [2**64, float(2**64)])
+def test_rust_bridge_carries_a_refusal_as_a_400_chunk(key, value):
     """The Rust frontend turns an in-band error chunk into its status; a bare
     ``err`` frame would be a 500."""
     from mstar.api_server.rust_frontend import RustFrontendBridge
@@ -312,7 +369,7 @@ def test_rust_bridge_carries_a_refusal_as_a_400_chunk():
     bridge.server = types.SimpleNamespace(
         submit_request=lambda **kw: normalize_generation_kwargs(kw["model_kwargs"]),
     )
-    bridge._submit({"rid": "r1", "model_kwargs": {"seed": 2**64}})
+    bridge._submit({"rid": "r1", "model_kwargs": {key: value}})
     [frame] = sent
     assert (frame["t"], frame["modality"], frame["metadata"]) == ("chunk", "error", {"status": 400, "refused": True})
 

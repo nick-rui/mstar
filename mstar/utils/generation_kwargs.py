@@ -48,6 +48,9 @@ _REAL_RULES = {
 }
 _INT_RULES = {
     **INT_KNOB_RULES,
+    "min_tokens": (">= 0", lambda v: v >= 0),
+    "repetition_window": (">= 0", lambda v: v >= 0),
+    "top_p_min_keep": (">= 1", lambda v: v >= 1),
     "max_output_tokens": (">= 1", lambda v: v >= 1),
     "num_inference_steps": (">= 1", lambda v: v >= 1),
     "num_step": (">= 1", lambda v: v >= 1),

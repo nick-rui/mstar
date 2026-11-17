@@ -45,9 +45,11 @@ def check_real_knob(key: str, value, rule: str, ok) -> None:
 
 
 def check_int_knob(key: str, value, rule: str, ok) -> None:
-    """Raise ``ValueError`` unless ``value`` is an integer satisfying ``ok``."""
+    """Raise ``ValueError`` unless ``value`` is an int64 satisfying ``ok``."""
     if isinstance(value, bool) or not isinstance(value, int) or not ok(value):
         raise ValueError(f"{key} must be an integer {rule}; got {value!r}")
+    if not -(2**63) <= value < 2**63:
+        raise ValueError(f"{key} must fit in a signed 64-bit integer; got {value!r}")
 
 
 def check_bool_knob(key: str, value) -> None:

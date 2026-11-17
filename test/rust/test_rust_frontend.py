@@ -399,6 +399,33 @@ def test_refused_ingest_is_a_400_not_a_hang(stack):
         "Hello world"
 
 
+@pytest.mark.parametrize("key", ["top_k", "max_output_tokens", "num_frames"])
+def test_generate_rejects_oversized_integer_settings(stack, monkeypatch, key):
+    from mstar.communication import wire
+    from mstar.utils.generation_kwargs import normalize_generation_kwargs
+    from mstar.utils.ipc_format import ConductorMessage, ConductorMessageType, NewRequestConductor
+
+    port, stub, _bridge, _proc = stack
+    submit = stub.submit_request
+
+    def checked_submit(**kwargs):
+        kwargs["model_kwargs"] = normalize_generation_kwargs(kwargs["model_kwargs"])
+        wire.encode(ConductorMessage(ConductorMessageType.NEW_REQUEST, NewRequestConductor(
+            "r#1", {}, ["text"], ["text"], {}, kwargs["model_kwargs"],
+        )))
+        return submit(**kwargs)
+
+    monkeypatch.setattr(stub, "submit_request", checked_submit)
+    body = urllib.parse.urlencode({
+        "text": "hi", "output_modalities": "text", "streaming": "false",
+        "model_kwargs": json.dumps({key: 2**64}),
+    }).encode()
+    code, response = _post_raw(port, "/generate", body, "application/x-www-form-urlencoded")
+    assert code == 400, (code, response)
+    assert key in response["detail"]
+    assert stub.submitted == []
+
+
 def test_health_goes_red_when_the_bridge_dies(stack):
     port, _stub, bridge, _proc = stack
     bridge.stop()
