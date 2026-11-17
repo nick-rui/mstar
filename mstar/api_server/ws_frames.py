@@ -101,6 +101,14 @@ def _files(message) -> list[dict]:
     return [entry for files in found for entry in files if isinstance(entry, dict)]
 
 
+def discard_uploads(message) -> None:
+    """Remove a refused message's files without waiting for its references to die."""
+    for entry in _files(message):
+        data = entry.get("data")
+        if isinstance(data, SavedUpload):
+            _unlink(data.claim())
+
+
 def save_entry(name: str, data, upload_dir: Path, prefix: str | None = None) -> Path:
     """Save a file's ``data``: raw bytes, or base64 text, by the decoder the
     data-URL paths use (unpadded or wrapped is fine; a bad alphabet is the

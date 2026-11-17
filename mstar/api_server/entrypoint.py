@@ -2734,6 +2734,7 @@ async def generate_ws(websocket: WebSocket):
                 del message["request_id"]
             request_id = message.get("request_id")
             if request_id is not None and not isinstance(request_id, str):
+                ws_frames.discard_uploads(message)
                 reply({"request_id": None, "error": "request_id must be a string"}, binary)
                 continue
             try:

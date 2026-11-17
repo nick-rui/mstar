@@ -299,6 +299,37 @@ def test_uploads_are_cleaned_up(monkeypatch, tmp_path, off_loop):
     assert saved == ["a.png", "b.wav"], saved
 
 
+@pytest.mark.parametrize("binary", [False, True])
+@pytest.mark.parametrize("append", [False, True])
+def test_refused_uploads_are_removed_before_reply(monkeypatch, tmp_path, frame_pool, binary, append):
+    _every_frame_off_the_loop(monkeypatch)
+    fake = _FakeServer(tmp_path)
+    monkeypatch.setattr(entrypoint, "api_server", fake)
+    parse_frame = ws_frames.parse_frame
+    parsed = []
+
+    async def retain_parsed_frame(*args):
+        message = await parse_frame(*args)
+        # The executor's future may outlive the receive loop's reference.
+        parsed.append(message)
+        return message
+
+    monkeypatch.setattr(ws_frames, "parse_frame", retain_parsed_frame)
+    record = {"files": [{"name": "d.png", "data": b"D" if binary else "RA=="}]}
+    message = {"request_id": 5, **({"append": record} if append else record)}
+    with TestClient(entrypoint.app).websocket_connect("/generate/ws") as ws:
+        if binary:
+            ws.send_bytes(msgpack.packb(message))
+            refused = msgpack.unpackb(ws.receive_bytes(), raw=False)
+        else:
+            ws.send_text(json.dumps(message))
+            refused = json.loads(ws.receive_text())
+        assert refused["error"] == "request_id must be a string"
+        assert parsed
+        assert list(tmp_path.iterdir()) == []
+    assert not fake.submitted
+
+
 async def _saved(task: asyncio.Task, upload_dir: Path) -> None:
     """Until ``task``'s parse has saved its first file, ``a.png``."""
     deadline = time.monotonic() + 30
